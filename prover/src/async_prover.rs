@@ -1,103 +1,16 @@
-// Copyright (c) Facebook, Inc. and its affiliates.
-//
-// This source code is licensed under the MIT license found in the
-// LICENSE file in the root directory of this source tree.
 
-//! This crate contains Winterfell STARK prover.
-//!
-//! This prover can be used to generate proofs of computational integrity using the
-//! [STARK](https://eprint.iacr.org/2018/046) (Scalable Transparent ARguments of Knowledge)
-//! protocol.
-//!
-//! When the crate is compiled with `concurrent` feature enabled, proof generation will be
-//! performed in multiple threads (usually, as many threads as there are logical cores on the
-//! machine). The number of threads can be configured via `RAYON_NUM_THREADS` environment
-//! variable.
-//!
-//! # Usage
-//! To generate a proof that a computation was executed correctly, you'll need to do the
-//! following:
-//!
-//! 1. Define an *algebraic intermediate representation* (AIR) for your computation. This can
-//!    be done by implementing [Air] trait.
-//! 2. Define an execution trace for your computation. This can be done by implementing [Trace]
-//!    trait. Alternatively, you can use [TraceTable] struct which already implements [Trace]
-//!    trait in cases when this generic implementation works for your use case.
-//! 3. Execute your computation and record its execution trace.
-//! 4. Define your prover by implementing [Prover] trait. Then execute [Prover::prove()] function
-//!    passing the trace generated in the previous step into it as a parameter. The function will
-//!    return a instance of [StarkProof].
-//!
-//! This [StarkProof] can be serialized and sent to a STARK verifier for verification. The size
-//! of proof depends on the specifics of a given computation, but for most computations it should
-//! be in the range between 15 KB (for very small computations) and 300 KB (for very large
-//! computations).
-//!
-//! Proof generation time is also highly dependent on the specifics of a given computation, but
-//! also depends on the capabilities of the machine used to generate the proofs (i.e. on number
-//! of CPU cores and memory bandwidth).
-
-#![no_std]
-
-#[macro_use]
-extern crate alloc;
-
-
-pub mod async_prover;
-pub use air::{
-    proof, proof::StarkProof, Air, AirContext, Assertion, AuxTraceRandElements, BoundaryConstraint,
-    BoundaryConstraintGroup, ConstraintCompositionCoefficients, ConstraintDivisor,
-    DeepCompositionCoefficients, EvaluationFrame, FieldExtension, ProofOptions, TraceInfo,
-    TraceLayout, TransitionConstraintDegree,
-};
-pub use tracing::{event, info_span, Level};
-pub use utils::{
-    iterators, ByteReader, ByteWriter, Deserializable, DeserializationError, Serializable,
-    SliceReader,
-};
-
-use alloc::vec::Vec;
-pub use fri::FriProver;
-
-pub use math;
-use math::{
-    fft::infer_degree,
-    fields::{CubeExtension, QuadExtension},
-    ExtensibleField, FieldElement, StarkField, ToElements,
-};
-
-pub use crypto;
-use crypto::{ElementHasher, RandomCoin};
-
-mod domain;
-pub use domain::StarkDomain;
-
-pub mod matrix;
-use matrix::{ColMatrix, RowMatrix};
-
-pub mod constraints;
-pub use constraints::{
-    CompositionPoly, CompositionPolyTrace, ConstraintCommitment, ConstraintEvaluator,
-    DefaultConstraintEvaluator,
-};
-
-pub mod composer;
-use composer::DeepCompositionPoly;
-
-pub mod trace;
-pub use trace::{DefaultTraceLde, Trace, TraceLde, TracePolyTable, TraceTable, TraceTableFragment};
-
-pub mod channel;
-use channel::ProverChannel;
-
-pub mod errors;
-pub use errors::ProverError;
-
-#[cfg(test)]
-pub mod tests;
 
 // PROVER
 // ================================================================================================
+
+use air::{proof::StarkProof, Air, AuxTraceRandElements, ConstraintCompositionCoefficients, FieldExtension, ProofOptions, TraceInfo};
+use alloc::vec::Vec;
+use crypto::{ElementHasher, RandomCoin};
+use fri::FriProver;
+use math::{fft::infer_degree, fields::{CubeExtension, QuadExtension}, ExtensibleField, FieldElement, StarkField, ToElements};
+use tracing::info_span;
+
+use crate::{channel::ProverChannel, composer::DeepCompositionPoly, matrix::{ColMatrix, RowMatrix}, CompositionPoly, CompositionPolyTrace, ConstraintCommitment, ConstraintEvaluator, ProverError, StarkDomain, Trace, TraceLde, TracePolyTable};
 
 // this segment width seems to give the best performance for small fields (i.e., 64 bits)
 const DEFAULT_SEGMENT_WIDTH: usize = 8;
@@ -124,7 +37,7 @@ const DEFAULT_SEGMENT_WIDTH: usize = 8;
 /// of these types are provided with the prover). For example, providing custom implementations
 /// of [TraceLde] and/or [ConstraintEvaluator] can be beneficial when some steps of proof
 /// generation can be delegated to non-CPU hardware (e.g., GPUs).
-pub trait Prover {
+pub trait AsyncProver {
     /// Base field for the computation described by this prover.
     type BaseField: StarkField + ExtensibleField<2> + ExtensibleField<3>;
 
@@ -157,7 +70,7 @@ pub trait Prover {
     /// trace.
     ///
     /// Public inputs need to be shared with the verifier in order for them to verify a proof.
-    fn get_pub_inputs(&self, trace: &Self::Trace) -> <<Self as Prover>::Air as Air>::PublicInputs;
+    fn get_pub_inputs(&self, trace: &Self::Trace) -> <<Self as AsyncProver>::Air as Air>::PublicInputs;
 
     /// Returns [ProofOptions] which this prover uses to generate STARK proofs.
     ///
@@ -171,7 +84,7 @@ pub trait Prover {
     ///
     /// Returns a tuple containing a [TracePolyTable] with the trace polynomials for the main trace
     /// and a new [TraceLde] instance from which the LDE and trace commitments can be obtained.
-    fn new_trace_lde<E>(
+    async fn new_trace_lde<E>(
         &self,
         trace_info: &TraceInfo,
         main_trace: &ColMatrix<Self::BaseField>,
@@ -182,7 +95,7 @@ pub trait Prover {
 
     /// Returns a new constraint evaluator which can be used to evaluate transition and boundary
     /// constraints over the extended execution trace.
-    fn new_evaluator<'a, E>(
+    async fn new_evaluator<'a, E>(
         &self,
         air: &'a Self::Air,
         aux_rand_elements: AuxTraceRandElements<E>,
@@ -201,23 +114,23 @@ pub trait Prover {
     /// the computation described by [Self::Air](Prover::Air) and generated using some set of
     /// secret and public inputs. Public inputs must match the value returned from
     /// [Self::get_pub_inputs()](Prover::get_pub_inputs) for the provided trace.
-    fn prove(&self, trace: Self::Trace) -> Result<StarkProof, ProverError> {
+    async fn prove(&self, trace: Self::Trace) -> Result<StarkProof, ProverError> {
         // figure out which version of the generic proof generation procedure to run. this is a sort
         // of static dispatch for selecting two generic parameter: extension field and hash
         // function.
         match self.options().field_extension() {
-            FieldExtension::None => self.generate_proof::<Self::BaseField>(trace),
+            FieldExtension::None => self.generate_proof::<Self::BaseField>(trace).await,
             FieldExtension::Quadratic => {
                 if !<QuadExtension<Self::BaseField>>::is_supported() {
                     return Err(ProverError::UnsupportedFieldExtension(2));
                 }
-                self.generate_proof::<QuadExtension<Self::BaseField>>(trace)
+                self.generate_proof::<QuadExtension<Self::BaseField>>(trace).await
             }
             FieldExtension::Cubic => {
                 if !<CubeExtension<Self::BaseField>>::is_supported() {
                     return Err(ProverError::UnsupportedFieldExtension(3));
                 }
-                self.generate_proof::<CubeExtension<Self::BaseField>>(trace)
+                self.generate_proof::<CubeExtension<Self::BaseField>>(trace).await
             }
         }
     }
@@ -229,7 +142,7 @@ pub trait Prover {
     /// execution `trace` is valid against this prover's AIR.
     /// TODO: make this function un-callable externally?
     #[doc(hidden)]
-    fn generate_proof<E>(&self, mut trace: Self::Trace) -> Result<StarkProof, ProverError>
+    async fn generate_proof<E>(&self, mut trace: Self::Trace) -> Result<StarkProof, ProverError>
     where
         E: FieldElement<BaseField = Self::BaseField>,
     {
@@ -267,7 +180,7 @@ pub trait Prover {
             // extend the main execution trace and build a Merkle tree from the extended trace
             let span = info_span!("commit_to_main_trace_segment").entered();
             let (trace_lde, trace_polys) =
-                self.new_trace_lde(&trace.get_info(), trace.main_segment(), &domain);
+                self.new_trace_lde(&trace.get_info(), trace.main_segment(), &domain).await;
 
             // get the commitment to the main trace segment LDE
             let main_trace_root = trace_lde.get_main_trace_commitment();
@@ -287,7 +200,7 @@ pub trait Prover {
         for i in 0..trace.layout().num_aux_segments() {
             let num_columns = trace.layout().get_aux_segment_width(i);
             let (aux_segment, rand_elements) = {
-                let span = info_span!("build_aux_trace_segment", num_columns).entered();
+                let _ = info_span!("build_aux_trace_segment", num_columns).entered();
 
                 // draw a set of random elements required to build an auxiliary trace segment
                 let rand_elements = channel.get_aux_trace_segment_rand_elements(i);
@@ -297,7 +210,6 @@ pub trait Prover {
                     .build_aux_segment(&aux_trace_segments, &rand_elements)
                     .expect("failed build auxiliary trace segment");
 
-                drop(span);
                 (aux_segment, rand_elements)
             };
             assert_eq!(aux_segment.num_cols(), num_columns);
@@ -339,15 +251,12 @@ pub trait Prover {
         // compute random linear combinations of these evaluations using coefficients drawn from
         // the channel
         let ce_domain_size = air.ce_domain_size();
-        let composition_poly_trace =
-            info_span!("evaluate_constraints", ce_domain_size).in_scope(|| {
-                self.new_evaluator(
-                    &air,
-                    aux_trace_rand_elements,
-                    channel.get_constraint_composition_coeffs(),
-                )
-                .evaluate(&trace_lde, &domain)
-            });
+        let composition_poly_trace =self.new_evaluator(
+          &air,
+          aux_trace_rand_elements,
+          channel.get_constraint_composition_coeffs(),
+      ).await
+      .evaluate(&trace_lde, &domain);
         assert_eq!(composition_poly_trace.num_rows(), ce_domain_size);
 
         // 3 ----- commit to constraint evaluations -----------------------------------------------
@@ -360,7 +269,7 @@ pub trait Prover {
                 composition_poly_trace,
                 air.context().num_constraint_composition_columns(),
                 &domain,
-            );
+            ).await;
 
             // then, commit to the evaluations of constraints by writing the root of the constraint
             // Merkle tree into the channel
@@ -404,7 +313,7 @@ pub trait Prover {
             // polynomial
             deep_composition_poly.add_composition_poly(composition_poly, ood_evaluations);
 
-            event!(Level::DEBUG, "degree: {}", deep_composition_poly.degree());
+            //event!(Level::DEBUG, "degree: {}", deep_composition_poly.degree());
 
             drop(span);
             deep_composition_poly
@@ -445,7 +354,7 @@ pub trait Prover {
 
             // generate pseudo-random query positions
             let query_positions = channel.get_query_positions();
-            event!(Level::DEBUG, "query_positions_len: {}", query_positions.len());
+            //event!(Level::DEBUG, "query_positions_len: {}", query_positions.len());
 
             drop(span);
             query_positions
@@ -492,7 +401,7 @@ pub trait Prover {
     ///
     /// The commitment is computed by hashing each row in the evaluation matrix, and then building
     /// a Merkle tree from the resulting hashes.
-    fn build_constraint_commitment<E>(
+    async fn build_constraint_commitment<E>(
         &self,
         composition_poly_trace: CompositionPolyTrace<E>,
         num_constraint_composition_columns: usize,
