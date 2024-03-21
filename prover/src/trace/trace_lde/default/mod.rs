@@ -7,7 +7,7 @@ use super::{
     ColMatrix, ElementHasher, EvaluationFrame, FieldElement, Hasher, Queries, StarkDomain,
     TraceInfo, TraceLayout, TraceLde, TracePolyTable,
 };
-use crate::{RowMatrix, DEFAULT_SEGMENT_WIDTH};
+use crate::{AsyncTraceLde, RowMatrix, DEFAULT_SEGMENT_WIDTH};
 use alloc::vec::Vec;
 use crypto::MerkleTree;
 use tracing::info_span;
@@ -208,7 +208,18 @@ where
         self.trace_info.layout()
     }
 }
-
+impl<E: FieldElement, H: ElementHasher> AsyncTraceLde<E> for DefaultTraceLde<E, H>
+where
+    E: FieldElement,
+    H: ElementHasher<BaseField = E::BaseField> {
+    async fn add_aux_segment_async(
+        &mut self,
+        aux_trace: &ColMatrix<E>,
+        domain: &StarkDomain<<E as FieldElement>::BaseField>,
+    ) -> (ColMatrix<E>, <Self::HashFn as Hasher>::Digest) {
+        self.add_aux_segment(aux_trace, domain)
+    }
+}
 // HELPER FUNCTIONS
 // ================================================================================================
 
