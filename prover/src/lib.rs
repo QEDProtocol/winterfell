@@ -85,7 +85,7 @@ pub mod composer;
 use composer::DeepCompositionPoly;
 
 pub mod trace;
-pub use trace::{DefaultTraceLde, Trace, TraceLde, TracePolyTable, TraceTable, TraceTableFragment};
+pub use trace::{DefaultTraceLde, Trace, TraceLde, AsyncTraceLde, TracePolyTable, TraceTable, TraceTableFragment};
 
 pub mod channel;
 use channel::ProverChannel;

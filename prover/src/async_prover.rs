@@ -10,7 +10,7 @@ use fri::FriProver;
 use math::{fft::infer_degree, fields::{CubeExtension, QuadExtension}, ExtensibleField, FieldElement, StarkField, ToElements};
 use tracing::info_span;
 
-use crate::{channel::ProverChannel, composer::DeepCompositionPoly, matrix::{ColMatrix, RowMatrix}, CompositionPoly, CompositionPolyTrace, ConstraintCommitment, ConstraintEvaluator, ProverError, StarkDomain, Trace, TraceLde, TracePolyTable};
+use crate::{channel::ProverChannel, composer::DeepCompositionPoly, matrix::{ColMatrix, RowMatrix}, AsyncTraceLde, CompositionPoly, CompositionPolyTrace, ConstraintCommitment, ConstraintEvaluator, ProverError, StarkDomain, Trace, TraceLde, TracePolyTable};
 
 // this segment width seems to give the best performance for small fields (i.e., 64 bits)
 const DEFAULT_SEGMENT_WIDTH: usize = 8;
@@ -54,7 +54,7 @@ pub trait AsyncProver {
     type RandomCoin: RandomCoin<BaseField = Self::BaseField, Hasher = Self::HashFn>;
 
     /// Trace low-degree extension for building the LDEs of trace segments and their commitments.
-    type TraceLde<E>: TraceLde<E, HashFn = Self::HashFn>
+    type TraceLde<E>: AsyncTraceLde<E, HashFn = Self::HashFn>
     where
         E: FieldElement<BaseField = Self::BaseField>;
 
@@ -221,7 +221,7 @@ pub trait AsyncProver {
                 // trace
                 let span = info_span!("commit_to_aux_trace_segment").entered();
                 let (aux_segment_polys, aux_segment_root) =
-                    trace_lde.add_aux_segment(&aux_segment, &domain);
+                    trace_lde.add_aux_segment_async(&aux_segment, &domain).await;
 
                 // commit to the LDE of the extended auxiliary trace segment by writing the root of
                 // its Merkle tree into the channel

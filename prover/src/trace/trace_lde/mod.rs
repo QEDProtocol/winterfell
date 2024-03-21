@@ -69,3 +69,28 @@ pub trait TraceLde<E: FieldElement>: Sync {
     /// Returns the trace layout of the execution trace.
     fn trace_layout(&self) -> &TraceLayout;
 }
+
+
+
+pub trait AsyncTraceLde<E: FieldElement>: TraceLde<E> {
+    /// The hash function used for building the Merkle tree commitments to trace segment LDEs.
+
+    /// Takes auxiliary trace segment columns as input, interpolates them into polynomials in
+    /// coefficient form, evaluates the polynomials over the LDE domain, and commits to the
+    /// polynomial evaluations.
+    ///
+    /// Returns a tuple containing the column polynomials in coefficient form and the commitment
+    /// to the polynomial evaluations over the LDE domain.
+    ///
+    /// # Panics
+    ///
+    /// This function is expected to panic if any of the following are true:
+    /// - the number of rows in the provided `aux_trace` does not match the main trace.
+    /// - this segment would exceed the number of segments specified by the trace layout.
+    async fn add_aux_segment_async(
+        &mut self,
+        aux_trace: &ColMatrix<E>,
+        domain: &StarkDomain<E::BaseField>,
+    ) -> (ColMatrix<E>, <Self::HashFn as Hasher>::Digest);
+
+}
